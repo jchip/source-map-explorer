@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 const fs = require('fs'),
+  url = require('url'),
   fse = require('fs-extra'),
   os = require('os'),
   glob = require('glob'),
@@ -19,7 +20,7 @@ const doc = [
   '',
   'Usage:',
   '  source-map-explorer <script.js> [<script.js.map>]',
-  '  source-map-explorer [--json | --html | --tsv] [-m | --only-mapped] <script.js> [<script.js.map>] [--replace=BEFORE --with=AFTER]... [--noroot]',
+  '  source-map-explorer [--json | --html | --tsv | --offset] [-m | --only-mapped] <script.js> [<script.js.map>] [--replace=BEFORE --with=AFTER]... [--noroot]',
   '  source-map-explorer -h | --help | --version',
   '',
   'If the script file has an inline source map, you may omit the map parameter.',
@@ -28,11 +29,12 @@ const doc = [
   '  -h --help  Show this screen.',
   '  --version  Show version.',
   '',
-  '  --json  Output JSON (on stdout) instead of generating HTML',
-  '          and opening the browser.',
-  '  --tsv   Output TSV (on stdout) instead of generating HTML',
-  '          and opening the browser.',
-  '  --html  Output HTML (on stdout) rather than opening a browser.',
+  '  --json    Output JSON (on stdout) instead of generating HTML',
+  '            and opening the browser.',
+  '  --tsv     Output TSV (on stdout) instead of generating HTML',
+  '            and opening the browser.',
+  '  --html    Output HTML (on stdout) rather than opening a browser.',
+  '  --offset  Output module byte offsets in the bundle as JSON',
   '',
   '  -m --only-mapped  Exclude "unmapped" bytes from the output.',
   '                    This will result in total counts less than the file size',
@@ -56,6 +58,7 @@ const doc = [
  * @property {boolean} `--json`
  * @property {boolean} `--html`
  * @property {boolean} `--tsv`
+ * @property {boolean} `--offset`
  * @property {boolean}  `--only-mapped`
  * @property {boolean}  `-m`
  * @property {string[]} `--replace`
@@ -143,20 +146,36 @@ function computeGeneratedFileSizes(mapConsumer, generatedJs) {
 
   var unmappedBytes = 0;
   var files = {};
+  var offsets = {};
+  var unmapped = [];
   var totalBytes = 0;
+
+  const saveOffset = nc => ({ offset: totalBytes, size: nc });
+
   for (var i = 0; i < spans.length; i++) {
     var span = spans[i];
     var numChars = span.numChars;
-    totalBytes += numChars;
     if (span.source === null) {
       unmappedBytes += numChars;
+      unmapped.push(totalBytes);
+      offsets[`${UNMAPPED}-${unmapped.length}`] = [saveOffset(numChars)];
     } else {
-      files[span.source] = (files[span.source] || 0) + span.numChars;
+      var source = url.parse(span.source).pathname;
+      if (files[source]) {
+        files[source] += numChars;
+        offsets[source].push(saveOffset(numChars));
+      } else {
+        files[source] = numChars;
+        offsets[source] = [saveOffset(numChars)];
+      }
     }
+    totalBytes += numChars;
   }
 
   return {
     files,
+    offsets,
+    unmapped,
     unmappedBytes,
     totalBytes,
   };
@@ -435,7 +454,7 @@ function explore(code, map, options) {
 
   files = adjustSourcePaths(files, !options.noRoot, options.replace);
 
-  const { totalBytes, unmappedBytes } = sizes;
+  const { totalBytes, unmappedBytes, offsets, unmapped } = sizes;
 
   if (!options.onlyMapped) {
     files[UNMAPPED] = unmappedBytes;
@@ -445,6 +464,8 @@ function explore(code, map, options) {
     totalBytes,
     unmappedBytes,
     files,
+    offsets,
+    unmapped,
   };
 
   if (options.html) {
@@ -527,7 +548,7 @@ function getBundles(codePath, mapPath) {
  */
 function getExploreOptions(args) {
   let html = true;
-  if (args['--json'] || args['--tsv']) {
+  if (args['--json'] || args['--tsv'] || args['--offset']) {
     html = false;
   }
 
@@ -677,7 +698,22 @@ if (require.main === module) {
 
     reportUnmappedBytes(data);
 
-    if (args['--json']) {
+    if (args['--offset']) {
+      console.log(
+        JSON.stringify(
+          data.offsets,
+          (key, value) => {
+            if (Array.isArray(value)) {
+              return value.map(x => `${x.offset} ${x.size}`).join('; ');
+            }
+
+            return value;
+          },
+          '  '
+        )
+      );
+      process.exit(0);
+    } else if (args['--json']) {
       console.log(JSON.stringify(data.files, null, '  '));
       process.exit(0);
     } else if (args['--tsv']) {
